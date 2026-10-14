@@ -1,5 +1,5 @@
 /* -------------------------------------------------------------------------
- * Monitoramento e Controle Inteligente de Temperatura
+ * Monitoramento e Controle Inteligente de Temperatura  -  Rev 1.1
  * ---------------------------------------------------------------------
  * Firmware para STM8S003F3P6 que le a temperatura com o sensor LM35 e
  * controla a velocidade de uma ventoinha de 5 V por PWM.
@@ -24,41 +24,67 @@
  *        - piscando rapido .... falha na leitura do sensor (ventoinha em
  *                               100% por seguranca, "esfria por duvida")
  *
+ * ================== ALTERACOES DA REV 1.1 (em relacao a 1.0) ===========
+ *   [1] BASE DE TEMPO POR INTERRUPCAO: o TIM4 gera uma interrupcao a cada
+ *       1 ms. A ISR sinaliza o ciclo de controle (LOOP_MS) e o pisca do
+ *       LED (PISCA_MS) por flags. O laco principal NAO usa mais
+ *       delayMs(): processa quando a flag chega e dorme com wfi().
+ *       -> atende o requisito "tratamento de interrupcoes / sem delays
+ *          travantes no main" proposto no TDE01.
+ *   [2] FALHA DO SENSOR SEM BLOQUEIO: Tratar_FalhaSensor() tinha um
+ *       while(1) com delayMs(150). Agora a falha e um estado: ventoinha
+ *       em 100%, LED piscando pelo TIM4 e o sistema continua lendo o
+ *       sensor a cada ciclo, voltando sozinho ao normal.
+ *   [3] CORRECAO - PWM DO CANAL 3: o modo do canal 3 do TIM1 fica no
+ *       registrador CCMR3 (CCMR1..CCMR4 = canais 1..4). A Rev 1.0
+ *       escrevia em CCMR2 (canal 2), deixando o CH3 em modo "frozen":
+ *       a saida PC3 nao gerava PWM e a ventoinha nao ligava.
+ *   [4] CORRECAO - PRESCALER DO ADC: SPSEL fica nos bits 6:4 do ADC1_CR1.
+ *       O valor 0x10 resultava em SPSEL=001 (fMASTER/3 = 5,3 MHz) e nao
+ *       em /8 como dizia o comentario. Agora 0x40 -> fADC = 2 MHz.
+ *   [5] CORRECAO - HISTERESE: com a ventoinha ligada e a temperatura
+ *       entre 28 e 30 C, (tempX10 - TEMP_LIGA_X10) era negativo em
+ *       variavel sem sinal -> estouro e duty "lixo". Agora, nessa faixa,
+ *       o duty fica no minimo (DUTY_MINIMO_PCT).
+ *   [6] ORDEM DE LEITURA DO ADC: com alinhamento a direita o RM0016 manda
+ *       ler DRL antes de DRH. A expressao unica da Rev 1.0 nao garantia a
+ *       ordem (ordem de avaliacao em C nao e definida).
+ *   [7] Schmitt trigger do PD2/AIN3 desligado (ADC1_TDRL): menos ruido
+ *       e menor consumo na entrada analogica.
+ *   [8] WATCHDOG INDEPENDENTE (IWDG, ~1 s): se o firmware travar (ex.: I2C
+ *       preso), o MCU reinicia e a ventoinha nao fica parada. Pode ser
+ *       desligado em USAR_WATCHDOG para depuracao.
+ *   [9] Duty 100% / CCR calculado com (ARR + 1), coerente com a formula
+ *       duty = CCR3 / (ARR + 1).
+ *
  * Ambiente de compilacao (mesmo do projeto da aula 07 - Ex02):
  *   ST Visual Develop + Cosmic CXSTM8 + STM8S Standard Peripheral Library
  *   Projeto compilado com -dSTM8S103 (registradores identicos para os
- *   perifericos usados aqui: GPIO, ADC1, TIM1, I2C e CLK).
+ *   perifericos usados aqui: GPIO, ADC1, TIM1, TIM4, IWDG, I2C e CLK).
  *
  * OBSERVACAO SOBRE O ESTILO DO CODIGO:
  *   GPIO, clock e I2C/LCD usam as funcoes da SPL (stm8s_gpio.c, stm8s_clk.c
- *   e stm8s_i2c.c ja fazem parte do projeto). O ADC1 e o TIM1, porem, sao
- *   configurados aqui por escrita DIRETA nos registradores. Motivo: o
- *   STM8S003 so tem 8 KB de flash e, no Cosmic, cada arquivo .c adicionado
- *   ao projeto entra inteiro no executavel (o linker nao descarta funcoes
- *   nao usadas de arquivos objetos). Com stm8s_adc1.c + stm8s_tim1.c no
- *   projeto, a build Debug (sem otimizacao) passa dos 8 KB. Acesso direto
- *   aos registradores cabe em ~100 linhas comentadas e mantem o projeto
- *   de laboratorio inalterado - nenhuma configuracao do STVD precisa ser
- *   mexida alem do main.c.
+ *   e stm8s_i2c.c ja fazem parte do projeto). ADC1, TIM1, TIM4 e IWDG sao
+ *   configurados por escrita DIRETA nos registradores. Motivo: o STM8S003
+ *   so tem 8 KB de flash e, no Cosmic, cada arquivo .c adicionado ao
+ *   projeto entra inteiro no executavel. NAO adicione stm8s_adc1.c,
+ *   stm8s_tim1.c, stm8s_tim4.c ou stm8s_iwdg.c ao projeto.
+ *
+ *   UNICA ALTERACAO FORA DO main.c: registrar a ISR do TIM4 (IRQ 23) no
+ *   arquivo stm8_interrupt_vector.c - ver stm8_interrupt_vector.c enviado.
  *
  * Clock: HSI de 16 MHz sem divisao (CLK_PRESCALER_HSIDIV1). As rotinas de
  * delay (delay.c) e o driver do LCD estao calibrados para esse clock.
  *
- * Mapa de pinos (esquematico v1.0, conferido no datasheet do STM8S003F3
- * em encapsulamento TSSOP-20):
+ * Mapa de pinos (esquematico Rev 1.1, TSSOP-20):
  *   PD2  pino 19  AIN3     <- TEMP  (saida do LM35)
  *   PC3  pino 13  TIM1_CH3 -> PWM   (gate do 2N7000 via resistor 100 R)
  *   PD4  pino  1           -> LED   (1 kR + LED ate GND; alto acende)
  *   PA3  pino 10           <- BTN   (Max_Cooler, fecha para GND)
  *   PB4  pino 12  SCL      <-> LCD I2C
  *   PB5  pino 11  SDA      <-> LCD I2C
- *   PD1  pino 18  SWIM     <-> gravador/programador
- *
- * ATENCAO - inconsistencia do esquematico (ver relatorio):
- *   O simbolo do MCU no PDF rotula o LED como "PD4" no pino 2, mas no
- *   TSSOP-20 oficial o pino 2 e PD5 (PD4 e o pino 1). Este firmware usa
- *   PD4. Se o LED nao acender na bancada, troque LED_GPIO_PIN abaixo
- *   para GPIO_PIN_5 e recompile - e corrija o simbolo no KiCad.
+ *   PD1  pino 18  SWIM     <-> gravador ST-Link (conector J1)
+ *   VCAP pino  8           -- 1 uF ceramico para GND (C5)
  *
  * ATENCAO - parametros provisorios:
  *   As faixas de temperatura, o duty minimo e a frequencia de PWM abaixo
@@ -73,7 +99,7 @@
 
 /* ================================ PINOS ================================ */
 
-/* LED de status. ATENCAO: ver nota sobre pino 1 x pino 2 no cabecalho. */
+/* LED de status (PD4 = pino 1 no TSSOP-20, conferido no esquematico 1.1) */
 #define LED_GPIO_PORT     GPIOD
 #define LED_GPIO_PIN      GPIO_PIN_4
 
@@ -105,23 +131,28 @@
    nao giram (travam) - ajuste segundo o modelo usado. */
 #define DUTY_MINIMO_PCT          35U
 
-/* Frequencia do PWM em Hz. 1 kHz e um meio-termo: acima do rangido
-   audivel de baixa frequencia e ainda suficientemente lenta para o
-   driver do motor. Se preferir silencio total, teste 25000 (o capacitor
-   de 100 uF em paralelo com a ventoinha passa a filtrar o PWM, gerando
-   uma tensao quase continua proporcional ao duty). */
+/* Frequencia do PWM em Hz. 1 kHz e um meio-termo. Se preferir silencio
+   total, teste 25000 (o capacitor de 100 uF em paralelo com a ventoinha
+   passa a filtrar o PWM, gerando uma tensao quase continua). */
 #define PWM_FREQUENCIA_HZ      1000U
 
 /* Numero de amostras do ADC usadas na media (filtragem do ruido). */
 #define ADC_AMOSTRAS              16U
 
-/* Periodo do laco principal, em milissegundos. */
+/* Periodo do ciclo de controle, em milissegundos (contado pelo TIM4). */
 #define LOOP_MS                  250U
+
+/* Meio periodo do pisca-pisca do LED em falha, em milissegundos. */
+#define PISCA_MS                 150U
 
 /* Limites de leitura plausivel (LM35 alimentado a 5 V mede 2 a 150 C).
    Fora disso considera-se falha do sensor (fio solto, curto etc.). */
 #define TEMP_MINIMA_VALIDA_X10    20U
 #define TEMP_MAXIMA_VALIDA_X10  1500U
+
+/* Watchdog: 1 = ligado (uso normal), 0 = desligado (depuracao/bancada,
+   ex.: ao investigar um LCD que nao responde no I2C). */
+#define USAR_WATCHDOG              1
 
 /* Periodo do PWM: fMASTER = 16 MHz, prescaler do TIM1 = 1.
    ARR = (16 MHz / frequencia) - 1  (ex.: 1 kHz -> 15999) */
@@ -134,6 +165,34 @@ typedef enum
     TEMP_OK   = 0,
     TEMP_ERRO = 1
 } TempStatus;
+
+/* Flags e contadores compartilhados com a ISR do TIM4 (volatile: sao
+   alterados dentro da interrupcao e lidos no laco principal). */
+static volatile uint8_t  flagCiclo  = 0U;   /* 1 a cada LOOP_MS  */
+static volatile uint8_t  flagPisca  = 0U;   /* 1 a cada PISCA_MS */
+static volatile uint16_t contCiclo  = 0U;
+static volatile uint8_t  contPisca  = 0U;
+
+/* ==================== INTERRUPCAO DO TIM4 (IRQ 23) ===================== */
+
+/* Chamada a cada 1 ms (overflow/update do TIM4). Mantida curta: apenas
+   conta e sinaliza; todo o processamento acontece no laco principal.
+   Registrada na posicao irq23 do stm8_interrupt_vector.c. */
+@far @interrupt void TIM4_UPD_OVF_IRQHandler(void)
+{
+    TIM4->SR1 = (uint8_t)(~TIM4_SR1_UIF);   /* limpa a flag de update */
+
+    if (++contCiclo >= LOOP_MS)
+    {
+        contCiclo = 0U;
+        flagCiclo = 1U;
+    }
+    if (++contPisca >= PISCA_MS)
+    {
+        contPisca = 0U;
+        flagPisca = 1U;
+    }
+}
 
 /* ======================= INICIALIZACOES DO SISTEMA ===================== */
 
@@ -163,53 +222,42 @@ static void GPIO_Config(void)
 }
 
 /* -------------------------------------------------------------------------
- * ADC1 por registradores (ver comentario no cabecalho do arquivo).
+ * ADC1 por registradores.
  *
- * Mapa dos registradores usados (nomes iguais ao RM0016 da ST):
- *   ADC1_CR1: bit 0 = ADON (liga o bloco / inicia conversao)
- *             bits 4:2 = SPSEL (prescaler do clock do ADC)
- *   ADC1_CR2: bit 3 = ALIGN (0 = alinhado a esquerda, 1 = a direita)
- *   ADC1_CSR: bits 3:0 = numero do canal (3 = AIN3 = pino PD2)
- *             bit 7 = EOC (end of conversion)
- *   ADC1_DRH/DRL: resultado da conversao (10 bits, alinhado a direita)
- *
- * Sequencia de uma conversao unica (RM0016, secao do ADC1):
- *   1. ADON = 1 liga o ADC (feita uma unica vez aqui).
- *   2. Escrever 1 em ADON de novo inicia a conversao.
- *   3. Esperar EOC = 1 e ler DRH:DRL.
+ *   ADC1_CR1:  bits 6:4 = SPSEL (prescaler do clock do ADC)
+ *              bit 0    = ADON (liga o bloco / inicia conversao)
+ *   ADC1_CR2:  bit 3    = ALIGN (1 = alinhado a direita)
+ *   ADC1_CSR:  bits 3:0 = canal (3 = AIN3 = PD2); bit 7 = EOC
+ *   ADC1_TDRL: bit n = 1 desliga o Schmitt trigger do canal n
+ *   ADC1_DRH/DRL: resultado (10 bits). Alinhado a direita: ler DRL
+ *                 PRIMEIRO e depois DRH (RM0016).
  * --------------------------------------------------------------------- */
 static void ADC_Config(void)
 {
-    /* Prescaler do ADC: SPSEL = 100 -> fADC = fMASTER/8 = 2 MHz
-       (dentro do recomendado; conversao em poucos microssegundos). */
-    ADC1->CR1 = (uint8_t)0x10;        /* SPSEL=100, ADC ainda desligado */
+    /* [4] SPSEL = 100 (bits 6:4) -> fADC = fMASTER/8 = 2 MHz */
+    ADC1->CR1 = (uint8_t)0x40;        /* ADC ainda desligado (ADON = 0)  */
 
-    ADC1->CR2 = ADC1_CR2_ALIGN;       /* ALIGN=1 -> resultado a direita:  */
-                                      /* DRH:DRL forma o valor de 10 bits */
+    ADC1->CR2 = ADC1_CR2_ALIGN;       /* resultado alinhado a direita    */
 
-    ADC1->CSR = TEMP_ADC_CANAL;       /* seleciona o canal 3 (PD2/AIN3);  */
-                                      /* escrever no CSR tambem zera EOC  */
+    ADC1->CSR = TEMP_ADC_CANAL;       /* canal 3 (PD2/AIN3); zera EOC    */
 
-    ADC1->CR1 |= ADC1_CR1_ADON;       /* liga o bloco do ADC              */
-    delayUs(10);                      /* tempo de estabilizacao (tSTAB)   */
+    /* [7] desliga o Schmitt trigger da entrada AIN3 (uso analogico) */
+    ADC1->TDRL = (uint8_t)(1U << TEMP_ADC_CANAL);
+
+    ADC1->CR1 |= ADC1_CR1_ADON;       /* liga o bloco do ADC             */
+    delayUs(10);                      /* tempo de estabilizacao (tSTAB)  */
 }
 
 /* -------------------------------------------------------------------------
  * TIM1 por registradores: PWM no canal 3, que sai no pino PC3.
  *
- * O TIM1 conta de 0 ate ARR; a saida fica em nivel alto enquanto o
- * contador for menor que CCR3 (modo PWM 1). Logo:
- *
  *   frequencia = 16 MHz / (PSC + 1) / (ARR + 1)
  *   duty (%)   = 100 * CCR3 / (ARR + 1)
  *
- * Registradores envolvidos:
- *   PSCRH/PSCRL - prescaler (0 = dividir por 1)
- *   ARRH/ARRL   - valor de recarga (define a frequencia)
- *   CCMR2       - modo do canal 3 (OC3M) e preload do CCR3 (OC3PE)
- *   CCER2       - habilita a saida do canal 3 (CC3E) e polaridade (CC3P)
- *   BKR         - bit MOE: saidas do timer "avancado" (obrigatorio!)
- *   CR1         - ARPE (preload do ARR) e CEN (liga o contador)
+ *   CCMR3 - modo do canal 3 (OC3M) e preload do CCR3 (OC3PE)
+ *   CCER2 - habilita a saida do canal 3 (CC3E) e polaridade (CC3P)
+ *   BKR   - bit MOE: saidas do timer "avancado" (obrigatorio!)
+ *   CR1   - ARPE (preload do ARR) e CEN (liga o contador)
  * --------------------------------------------------------------------- */
 static void PWM_Config(void)
 {
@@ -219,27 +267,66 @@ static void PWM_Config(void)
     TIM1->PSCRL = 0x00;                          /* -> contador a 16 MHz  */
 
     TIM1->ARRH = (uint8_t)(PWM_ARR >> 8);        /* periodo do PWM        */
-    TIM1->ARRL = (uint8_t)(PWM_ARR & 0xFFU);     /* (frequencia)          */
+    TIM1->ARRL = (uint8_t)(PWM_ARR & 0xFFU);
 
     TIM1->CCR3H = 0x00;                          /* comeca em 0%          */
     TIM1->CCR3L = 0x00;                          /* (ventoinha desligada) */
 
-    /* CCMR2, canal 3:
+    /* [3] CCMR3 (canal 3) - na Rev 1.0 estava CCMR2 (canal 2):
        OC3M  (bits 6:4) = 110 -> modo PWM 1
-       OC3PE (bit 3)    = 1   -> CCR3 e atualizado apenas no fim do
-                                 periodo (evita glitch no duty)          */
-    TIM1->CCMR2 = (uint8_t)(0x60U | 0x08U);
+       OC3PE (bit 3)    = 1   -> CCR3 atualizado so no fim do periodo   */
+    TIM1->CCMR3 = (uint8_t)(0x60U | 0x08U);
 
-    /* CCER2: CC3E = 1 habilita a saida do canal 3 no pino PC3;
-       CC3P = 0 -> ativo em nivel alto (MOSFET conduz com "1")           */
+    /* CC3E = 1 habilita a saida no PC3; CC3P = 0 -> ativo em nivel alto */
     TIM1->CCER2 = TIM1_CCER2_CC3E;
 
-    /* O TIM1 e o timer "avancado": sem MOE=1 as saidas ficam mortas.
-       Esquecer isso e o erro classico do TIM1.                          */
+    /* TIM1 e timer "avancado": sem MOE=1 as saidas ficam mortas. */
     TIM1->BKR = TIM1_BKR_MOE;
 
-    /* ARPE = 1 (ARR com preload) + CEN = 1 (comeca a contar)            */
+    /* ARPE = 1 (ARR com preload) + CEN = 1 (comeca a contar) */
     TIM1->CR1 = (uint8_t)(TIM1_CR1_ARPE | TIM1_CR1_CEN);
+}
+
+/* -------------------------------------------------------------------------
+ * [1] TIM4 por registradores: base de tempo de 1 ms com interrupcao.
+ *
+ *   16 MHz / 64 (PSCR = 6) = 250 kHz -> 4 us por contagem
+ *   ARR = 249 -> 250 contagens = 1 ms por interrupcao de update
+ * --------------------------------------------------------------------- */
+static void TIM4_Config(void)
+{
+    CLK_PeripheralClockConfig(CLK_PERIPHERAL_TIMER4, ENABLE);
+
+    TIM4->CR1  = 0x00;                           /* parado durante config */
+    TIM4->PSCR = 0x06;                           /* prescaler = 2^6 = 64  */
+    TIM4->ARR  = 249U;                           /* 1 ms                  */
+    TIM4->CNTR = 0x00;
+    TIM4->SR1  = 0x00;                           /* limpa flags           */
+    TIM4->IER  = TIM4_IER_UIE;                   /* interrupcao de update */
+    TIM4->CR1  = (uint8_t)(TIM4_CR1_ARPE | TIM4_CR1_CEN);
+}
+
+/* -------------------------------------------------------------------------
+ * [8] IWDG por registradores: ~1,02 s (LSI 128 kHz / 2 / 256 * 256).
+ *   KR = 0xCC inicia | 0x55 libera PR/RLR | 0xAA recarrega ("alimenta")
+ *   Uma vez iniciado, o IWDG nao pode ser desligado ate o proximo reset.
+ * --------------------------------------------------------------------- */
+static void IWDG_Config(void)
+{
+#if USAR_WATCHDOG
+    IWDG->KR  = 0xCC;          /* inicia o watchdog                 */
+    IWDG->KR  = 0x55;          /* libera escrita em PR e RLR        */
+    IWDG->PR  = 0x06;          /* divisor /256                      */
+    IWDG->RLR = 0xFF;          /* contagem maxima -> ~1,02 s        */
+    IWDG->KR  = 0xAA;          /* recarrega e protege os registros  */
+#endif
+}
+
+static void IWDG_Alimentar(void)
+{
+#if USAR_WATCHDOG
+    IWDG->KR = 0xAA;
+#endif
 }
 
 /* ====================== LEITURA DA TEMPERATURA ========================= */
@@ -251,12 +338,11 @@ static void PWM_Config(void)
    Formula: o LM35 gera 10 mV por grau, entao a temperatura em decimos
    de grau coincide numericamente com a tensao em milivolts:
 
-     T [0.1 C] = V [mV] = bruto * VREF_MV / 1023
-
-   (bruto vai de 0 a 1023, sendo 1023 o fundo de escala = VREF_MV). */
+     T [0.1 C] = V [mV] = bruto * VREF_MV / 1023                      */
 static TempStatus Temperatura_Ler(uint16_t *tempX10)
 {
     uint8_t  i;
+    uint8_t  baixo, alto;
     uint16_t guarda;
     uint32_t media;
 
@@ -267,7 +353,7 @@ static TempStatus Temperatura_Ler(uint16_t *tempX10)
         ADC1->CSR = TEMP_ADC_CANAL;
         ADC1->CR1 |= ADC1_CR1_ADON;
 
-        /* espera EOC com protecao contra travamento */
+        /* espera EOC com protecao contra travamento (~7 us normalmente) */
         guarda = 0;
         while ((ADC1->CSR & ADC1_CSR_EOC) == 0U)
         {
@@ -277,8 +363,10 @@ static TempStatus Temperatura_Ler(uint16_t *tempX10)
             }
         }
 
-        /* resultado de 10 bits alinhado a direita */
-        media += (uint16_t)(((uint16_t)ADC1->DRH << 8) | (uint16_t)ADC1->DRL);
+        /* [6] alinhado a direita: DRL primeiro, depois DRH */
+        baixo = ADC1->DRL;
+        alto  = ADC1->DRH;
+        media += (uint16_t)(((uint16_t)alto << 8) | (uint16_t)baixo);
     }
     media /= ADC_AMOSTRAS;
 
@@ -302,6 +390,9 @@ static TempStatus Temperatura_Ler(uint16_t *tempX10)
 
 /* ================= CONTROLE DA VENTOINHA (logica) ====================== */
 
+/* Estado da histerese (fora da funcao para a falha poder ajusta-lo). */
+static uint8_t ventoinhaLigada = 0U;
+
 /* Define o duty cycle (0 a 100) segundo a temperatura:
    - botao pressionado -> 100% (prioridade maxima, ignora temperatura)
    - histerese de ligar/desligar entre TEMP_DESLIGA_X10 e TEMP_LIGA_X10
@@ -309,8 +400,6 @@ static TempStatus Temperatura_Ler(uint16_t *tempX10)
      DUTY_MINIMO -> 100% */
 static uint8_t Controle_Duty(uint16_t tempX10, uint8_t botao)
 {
-    static uint8_t ventoinhaLigada = 0;
-
     if (botao != 0U)
     {
         return 100U;
@@ -334,6 +423,13 @@ static uint8_t Controle_Duty(uint16_t tempX10, uint8_t botao)
     if (ventoinhaLigada == 0U)
     {
         return 0U;
+    }
+
+    /* [5] ligada e ainda dentro da faixa de histerese (28 a 30 C):
+       mantem o duty minimo - evita subtracao negativa sem sinal */
+    if (tempX10 <= TEMP_LIGA_X10)
+    {
+        return (uint8_t)DUTY_MINIMO_PCT;
     }
 
     if (tempX10 >= TEMP_MAXIMA_X10)
@@ -364,7 +460,8 @@ static void Fan_SetDuty(uint8_t duty)
     }
     else
     {
-        ccr = (uint16_t)(((uint32_t)duty * (uint32_t)PWM_ARR) / 100UL);
+        /* [9] duty = CCR3 / (ARR + 1) */
+        ccr = (uint16_t)(((uint32_t)duty * ((uint32_t)PWM_ARR + 1UL)) / 100UL);
     }
     TIM1->CCR3H = (uint8_t)(ccr >> 8);   /* com OC3PE=1 o valor novo so  */
     TIM1->CCR3L = (uint8_t)(ccr & 0xFFU);/* vale no fim do periodo atual */
@@ -442,7 +539,7 @@ static void LCD_LinhaTemperatura(uint16_t tempX10)
     LCD_WriteString(linha);
 }
 
-/* Linha 2 do LCD: "Fan: 45% AUTO" / "Fan: 100% MAX" / "Fan: OFF". */
+/* Linha 2 do LCD: "Fan: 45% AUTO" / "Fan: 100% MAX" / "Fan: 0% OFF". */
 static void LCD_LinhaVentoinha(uint8_t duty, uint8_t botao)
 {
     char    linha[17];
@@ -490,28 +587,6 @@ static void LCD_MostrarErro(void)
     LCD_WriteString("Ventoinha: 100% ");
 }
 
-/* ==================== TRATAMENTO DE FALHA DO SENSOR ==================== */
-
-/* Falha: ventoinha em 100% (falhar esfriando e mais seguro), LED piscando
-   e mensagem de erro. Permanece aqui ate a leitura voltar a ser valida. */
-static void Tratar_FalhaSensor(void)
-{
-    uint16_t tempDescartada;
-
-    LCD_MostrarErro();
-    Fan_SetDuty(100U);
-
-    while (1)
-    {
-        GPIO_WriteReverse(LED_GPIO_PORT, LED_GPIO_PIN);   /* pisca = falha */
-        delayMs(150);
-        if (Temperatura_Ler(&tempDescartada) == TEMP_OK)
-        {
-            return;   /* sensor voltou: retorna ao controle normal */
-        }
-    }
-}
-
 /* ================================ MAIN ================================= */
 
 void main(void)
@@ -519,12 +594,17 @@ void main(void)
     uint16_t tempX10 = 0U;
     uint8_t  duty;
     uint8_t  botao;
+    uint8_t  emFalha = 0U;   /* [2] estado de falha do sensor (0/1) */
+
+    disableInterrupts();
 
     Clock_Config();
     GPIO_Config();
+    PWM_Config();            /* ventoinha em 0% o quanto antes */
     ADC_Config();
-    PWM_Config();
 
+    /* Tela inicial: ainda usa delayMs, mas apenas uma vez, antes de
+       ligar a base de tempo e o watchdog (nao afeta o laco principal) */
     LCD_Init();
     LCD_SetCursor(0, 0);
     LCD_WriteString("Controle Temp.  ");
@@ -535,21 +615,57 @@ void main(void)
     /* LED aceso fixo = sistema em operacao normal */
     GPIO_WriteHigh(LED_GPIO_PORT, LED_GPIO_PIN);
 
+    TIM4_Config();           /* [1] base de tempo de 1 ms              */
+    IWDG_Config();           /* [8] watchdog de ~1 s                   */
+    enableInterrupts();
+
     while (1)
     {
-        if (Temperatura_Ler(&tempX10) != TEMP_OK)
+        /* ---------- ciclo de controle: a cada LOOP_MS (flag da ISR) ---- */
+        if (flagCiclo != 0U)
         {
-            Tratar_FalhaSensor();
-            GPIO_WriteHigh(LED_GPIO_PORT, LED_GPIO_PIN);
+            flagCiclo = 0U;
+            IWDG_Alimentar();
+
+            if (Temperatura_Ler(&tempX10) != TEMP_OK)
+            {
+                /* [2] falha: ventoinha em 100% ("esfria por duvida") */
+                Fan_SetDuty(100U);
+                ventoinhaLigada = 1U;   /* ao normalizar, sai "esfriando" */
+                if (emFalha == 0U)
+                {
+                    emFalha = 1U;
+                    LCD_MostrarErro();  /* so escreve ao entrar na falha */
+                }
+            }
+            else
+            {
+                if (emFalha != 0U)
+                {
+                    emFalha = 0U;       /* sensor voltou ao normal */
+                    GPIO_WriteHigh(LED_GPIO_PORT, LED_GPIO_PIN);
+                }
+
+                botao = Botao_Pressionado();
+                duty  = Controle_Duty(tempX10, botao);
+                Fan_SetDuty(duty);
+
+                LCD_LinhaTemperatura(tempX10);
+                LCD_LinhaVentoinha(duty, botao);
+            }
         }
 
-        botao = Botao_Pressionado();
-        duty = Controle_Duty(tempX10, botao);
-        Fan_SetDuty(duty);
+        /* ---------- pisca do LED em falha: a cada PISCA_MS ------------- */
+        if (flagPisca != 0U)
+        {
+            flagPisca = 0U;
+            if (emFalha != 0U)
+            {
+                GPIO_WriteReverse(LED_GPIO_PORT, LED_GPIO_PIN);
+            }
+        }
 
-        LCD_LinhaTemperatura(tempX10);
-        LCD_LinhaVentoinha(duty, botao);
-
-        delayMs(LOOP_MS);
+        /* dorme ate a proxima interrupcao (TIM4 acorda a cada 1 ms) */
+        wfi();
     }
 }
